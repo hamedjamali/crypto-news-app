@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: ghcr.io/YOUR_USERNAME/YOUR_REPO-backend:latest
+    container_name: crypto-news-backend
+    restart: always
+    volumes:
+      - ./data:/app/data
+    networks:
+      - crypto-net
+    environment:
+      - TZ=Asia/Tehran
+
+  frontend:
+    build:
+      context: ./frontend
+    image: ghcr.io/YOUR_USERNAME/YOUR_REPO-frontend:latest
+    container_name: crypto-news-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - crypto-net
+
+networks:
+  crypto-net:
+    driver: bridge

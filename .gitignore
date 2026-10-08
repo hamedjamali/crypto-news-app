@@ -1,0 +1,16 @@
+# دیتابیس
+*.db
+news.db
+
+# dependencies
+node_modules/
+frontend/node_modules/
+
+# builds
+frontend/dist/
+backend/crypto-news-backend
+
+# فایل‌های سیستمی
+.DS_Store
+*.log
+.env
