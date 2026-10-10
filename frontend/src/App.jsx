@@ -250,7 +250,7 @@ const styles = {
     },
     source: { fontSize: 11, color: '#8b949e', marginRight: 'auto' },
     cardTitle: {
-        margin: '0 0 8px', fontSize: 15, lineHeight: 1.6, color: '#e6edf3',
+        margin: '0 0 8px', fontSize: 15, lineHeight: 1.6, color: '#e6edf3', overflowX: "auto",
     },
     cardDesc: {
         margin: 0, fontSize: 13, color: '#8b949e', lineHeight: 1.7, flex: 1,
