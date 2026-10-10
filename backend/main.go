@@ -170,7 +170,7 @@ var hub = NewHub()
 // ==================== دیتابیس ====================
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite3", "./news.db")
+	db, err = sql.Open("sqlite3", "/app/data/news.db")
 	if err != nil {
 		log.Fatal(err)
 	}
