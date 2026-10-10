@@ -1,5 +1,5 @@
 # مرحله ۱: بیلد
-FROM golang:1.21-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache gcc musl-dev sqlite-dev
 
