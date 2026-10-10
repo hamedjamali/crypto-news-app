@@ -301,66 +301,189 @@ func processArticle(item *gofeed.Item, sourceName string) {
 	category := categorize(item.Title, desc)
 	sentiment := analyzeSentiment(item.Title, desc)
 
-	// استخراج متن کامل
-	fullContent, err := extractFullContent(item.Link)
-	if err != nil {
-		log.Printf("⚠️ خطا در استخراج %s: %v", item.Link, err)
-		fullContent = desc
-	}
-
-	// ترجمه متن کامل
-	translatedContent, err := translateToPersian(fullContent)
-	if err != nil {
-		log.Printf("⚠️ خطا در ترجمه متن %s: %v", item.Link, err)
-		translatedContent = "ترجمه در دسترس نیست"
-	}
-
-	// ترجمه عنوان
-	translatedTitle, err := translateToPersian(item.Title)
-	if err != nil {
-		translatedTitle = item.Title
-	}
-
-	// ذخیره در دیتابیس
+	// ============ ۱. اول ذخیره فوری با متن RSS ============
 	result, err := db.Exec(
 		`INSERT OR IGNORE INTO news 
-		 (title, description, link, source, category, sentiment, published_at, full_content, translated_content, translated_title)
+		 (title, description, link, source, category, sentiment, published_at, 
+		  full_content, translated_content, translated_title)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.Title, desc, item.Link, sourceName, category, sentiment,
-		published, fullContent, translatedContent, translatedTitle,
+		published, desc, "", item.Title, // ترجمه خالی
 	)
 	if err != nil {
-		log.Printf("خطا در ذخیره: %v", err)
+		log.Printf("❌ خطا در ذخیره %s: %v", item.Link, err)
 		return
 	}
 
-	// اگر درج انجام شد، شناسه رو بگیر
 	id, _ := result.LastInsertId()
 	if id == 0 {
-		return // خبر تکراری بود
+		return // تکراری
 	}
 
 	newsItem := NewsItem{
-		ID:                int(id),
-		Title:             item.Title,
-		Description:       desc,
-		Link:              item.Link,
-		Source:            sourceName,
-		Category:          category,
-		Sentiment:         sentiment,
-		PublishedAt:       published,
-		FullContent:       fullContent,
-		TranslatedContent: translatedContent,
-		TranslatedTitle:   translatedTitle,
+		ID: int(id), Title: item.Title, Description: desc, Link: item.Link,
+		Source: sourceName, Category: category, Sentiment: sentiment,
+		PublishedAt: published, FullContent: desc,
+		TranslatedContent: "", TranslatedTitle: item.Title,
 	}
 
 	msg, _ := json.Marshal(map[string]interface{}{
-		"type": "new_news",
-		"data": newsItem,
+		"type": "new_news", "data": newsItem,
 	})
 	hub.Broadcast(msg)
-	log.Printf("✅ خبر جدید: %s", item.Title)
+	log.Printf("💾 ذخیره شد: %s", item.Title)
+
+	// ============ ۲. حالا در پس‌زمینه ترجمه کن ============
+	go enrichArticle(int(id), item.Link, item.Title, desc)
 }
+
+// enrichArticle: استخراج متن کامل + ترجمه، بعد UPDATE
+func enrichArticle(id int, link, title, desc string) {
+	// استخراج متن کامل
+	fullContent, err := extractFullContent(link)
+	if err != nil {
+		log.Printf("⚠️ استخراج %s: %v", link, err)
+		fullContent = desc
+	}
+
+	// ترجمه با timeout
+	translatedTitle := safeTranslate(title)
+	translatedContent := safeTranslate(fullContent)
+
+	// UPDATE دیتابیس
+	_, err = db.Exec(
+		`UPDATE news SET full_content = ?, translated_content = ?, translated_title = ? WHERE id = ?`,
+		fullContent, translatedContent, translatedTitle, id,
+	)
+	if err != nil {
+		log.Printf("⚠️ UPDATE %d: %v", id, err)
+		return
+	}
+
+	// ارسال آپدیت به کلاینت‌ها
+	updateMsg, _ := json.Marshal(map[string]interface{}{
+		"type": "update_news",
+		"data": map[string]interface{}{
+			"id":                 id,
+			"full_content":       fullContent,
+			"translated_content": translatedContent,
+			"translated_title":   translatedTitle,
+		},
+	})
+	hub.Broadcast(updateMsg)
+	log.Printf("✅ ترجمه شد: %s", title)
+}
+
+// safeTranslate: ترجمه با timeout (جلوگیری از hang)
+func safeTranslate(text string) string {
+	if text == "" {
+		return ""
+	}
+	if len(text) > 4500 {
+		text = text[:4500]
+	}
+
+	type result struct {
+		text string
+		err  error
+	}
+	ch := make(chan result, 1)
+
+	go func() {
+		t, err := gtranslate.TranslateWithParams(
+			text,
+			gtranslate.TranslationParams{From: "en", To: "fa"},
+		)
+		ch <- result{t, err}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return ""
+		}
+		return r.text
+	case <-time.After(15 * time.Second):
+		log.Printf("⏱️ timeout در ترجمه")
+		return ""
+	}
+}
+// func processArticle(item *gofeed.Item, sourceName string) {
+// 	var published time.Time
+// 	if item.PublishedParsed != nil {
+// 		published = *item.PublishedParsed
+// 	} else {
+// 		published = time.Now()
+// 	}
+
+// 	desc := stripHTML(item.Description)
+// 	if len(desc) > 500 {
+// 		desc = desc[:500] + "..."
+// 	}
+
+// 	category := categorize(item.Title, desc)
+// 	sentiment := analyzeSentiment(item.Title, desc)
+
+// 	// استخراج متن کامل
+// 	fullContent, err := extractFullContent(item.Link)
+// 	if err != nil {
+// 		log.Printf("⚠️ خطا در استخراج %s: %v", item.Link, err)
+// 		fullContent = desc
+// 	}
+
+// 	// ترجمه متن کامل
+// 	translatedContent, err := translateToPersian(fullContent)
+// 	if err != nil {
+// 		log.Printf("⚠️ خطا در ترجمه متن %s: %v", item.Link, err)
+// 		translatedContent = "ترجمه در دسترس نیست"
+// 	}
+
+// 	// ترجمه عنوان
+// 	translatedTitle, err := translateToPersian(item.Title)
+// 	if err != nil {
+// 		translatedTitle = item.Title
+// 	}
+
+// 	// ذخیره در دیتابیس
+// 	result, err := db.Exec(
+// 		`INSERT OR IGNORE INTO news 
+// 		 (title, description, link, source, category, sentiment, published_at, full_content, translated_content, translated_title)
+// 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+// 		item.Title, desc, item.Link, sourceName, category, sentiment,
+// 		published, fullContent, translatedContent, translatedTitle,
+// 	)
+// 	if err != nil {
+// 		log.Printf("خطا در ذخیره: %v", err)
+// 		return
+// 	}
+
+// 	// اگر درج انجام شد، شناسه رو بگیر
+// 	id, _ := result.LastInsertId()
+// 	if id == 0 {
+// 		return // خبر تکراری بود
+// 	}
+
+// 	newsItem := NewsItem{
+// 		ID:                int(id),
+// 		Title:             item.Title,
+// 		Description:       desc,
+// 		Link:              item.Link,
+// 		Source:            sourceName,
+// 		Category:          category,
+// 		Sentiment:         sentiment,
+// 		PublishedAt:       published,
+// 		FullContent:       fullContent,
+// 		TranslatedContent: translatedContent,
+// 		TranslatedTitle:   translatedTitle,
+// 	}
+
+// 	msg, _ := json.Marshal(map[string]interface{}{
+// 		"type": "new_news",
+// 		"data": newsItem,
+// 	})
+// 	hub.Broadcast(msg)
+// 	log.Printf("✅ خبر جدید: %s", item.Title)
+// }
 
 // ==================== دریافت فید ====================
 func fetchFeed(source RSSSource, wg *sync.WaitGroup) {
