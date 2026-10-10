@@ -16,7 +16,7 @@ import (
 	"github.com/go-shiori/go-readability"
 	"github.com/gofiber/contrib/v3/websocket"
 	"github.com/gofiber/fiber/v3"
-	"github.com/gofiber/fiber/v3/middleware/cors"
+	// "github.com/gofiber/fiber/v3/middleware/cors"
 	"github.com/mmcdole/gofeed"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -559,10 +559,10 @@ func main() {
 		AppName: "Crypto News Aggregator",
 	})
 
-	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept",
-	}))
+	// app.Use(cors.New(cors.Config{
+	// 	AllowOrigins: "*",
+	// 	AllowHeaders: "Origin, Content-Type, Accept",
+	// }))
 
 	// WebSocket
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
