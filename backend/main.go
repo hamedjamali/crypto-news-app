@@ -3,8 +3,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -259,26 +262,105 @@ func stripHTML(s string) string {
 	return result.String()
 }
 
-// ==================== ترجمه با timeout ====================
+// ==================== ترجمه اصلی: MyMemory + Fallback ====================
 func safeTranslate(text string) string {
 	if text == "" {
 		return ""
 	}
+
+	// محدودیت طول برای MyMemory
 	if len(text) > 4500 {
 		text = text[:4500]
 	}
 
+	// تلاش ۱: MyMemory (رایگان، بدون کلید)
+	if result := tryMyMemory(text); result != "" {
+		return result
+	}
+
+	// تلاش ۲: Google (اگه MyMemory کار نکرد)
+	if result := tryGTranslate(text); result != "" {
+		return result
+	}
+
+	return ""
+}
+
+// ==================== MyMemory ====================
+func tryMyMemory(text string) string {
+	// اگه متن بلنده، به تکه‌های ۵۰۰ کاراکتری تقسیم کن
+	if len(text) > 500 {
+		var parts []string
+		for i := 0; i < len(text); i += 500 {
+			end := i + 500
+			if end > len(text) {
+				end = len(text)
+			}
+			parts = append(parts, text[i:end])
+		}
+
+		var translated []string
+		for _, part := range parts {
+			if r := tryMyMemory(part); r != "" {
+				translated = append(translated, r)
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		if len(translated) > 0 {
+			return strings.Join(translated, " ")
+		}
+		return ""
+	}
+
+	encoded := url.QueryEscape(text)
+	apiURL := fmt.Sprintf(
+		"https://api.mymemory.translated.net/get?q=%s&langpair=en|fa",
+		encoded,
+	)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		ResponseData struct {
+			TranslatedText string `json:"translatedText"`
+		} `json:"responseData"`
+		ResponseStatus interface{} `json:"responseStatus"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return ""
+	}
+
+	translated := result.ResponseData.TranslatedText
+
+	// اگه خطای "PLEASE SELECT TWO DISTINCT LANGUAGES" یا مشابه داد، رد کن
+	if strings.Contains(translated, "PLEASE SELECT") ||
+		strings.Contains(translated, "INVALID") ||
+		translated == "" {
+		return ""
+	}
+
+	return translated
+}
+
+// ==================== Google (Fallback) ====================
+func tryGTranslate(text string) string {
 	type result struct {
 		text string
-		err  error
 	}
 	ch := make(chan result, 1)
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("⚠️ panic در ترجمه: %v", r)
-				ch <- result{"", nil}
+				ch <- result{""}
 			}
 		}()
 
@@ -286,23 +368,22 @@ func safeTranslate(text string) string {
 			text,
 			gtranslate.TranslationParams{From: "en", To: "fa"},
 		)
-		ch <- result{t, err}
+		if err != nil {
+			ch <- result{""}
+			return
+		}
+		ch <- result{t}
 	}()
 
 	select {
 	case r := <-ch:
-		if r.err != nil {
-			log.Printf("⚠️ خطای ترجمه: %v", r.err)
-			return ""
-		}
 		return r.text
-	case <-time.After(20 * time.Second):
-		log.Println("⏱️ timeout در ترجمه")
+	case <-time.After(10 * time.Second):
 		return ""
 	}
 }
 
-// ==================== غنی‌سازی خبر (پس‌زمینه) ====================
+// ==================== غنی‌سازی خبر ====================
 func enrichArticle(id int, link, title, desc string) {
 	// ۱. استخراج متن کامل
 	fullContent, err := extractFullContent(link)
@@ -344,7 +425,7 @@ func enrichArticle(id int, link, title, desc string) {
 		},
 	})
 	hub.Broadcast(updateMsg)
-	log.Printf("✅ ترجمه شد: %s", title)
+	log.Printf("✅ ترجمه شد: %s → %s", title, translatedTitle)
 }
 
 // ==================== پردازش یک خبر ====================
@@ -364,7 +445,7 @@ func processArticle(item *gofeed.Item, sourceName string) {
 	category := categorize(item.Title, desc)
 	sentiment := analyzeSentiment(item.Title, desc)
 
-	// ============ ۱. ذخیره فوری (بدون ترجمه) ============
+	// ۱. ذخیره فوری
 	result, err := db.Exec(
 		`INSERT OR IGNORE INTO news 
 		 (title, description, link, source, category, sentiment, published_at, 
@@ -380,10 +461,10 @@ func processArticle(item *gofeed.Item, sourceName string) {
 
 	id, _ := result.LastInsertId()
 	if id == 0 {
-		return // خبر تکراری
+		return
 	}
 
-	// ============ ۲. ارسال فوری به کلاینت ============
+	// ۲. ارسال فوری
 	newsItem := NewsItem{
 		ID:                int(id),
 		Title:             item.Title,
@@ -405,7 +486,7 @@ func processArticle(item *gofeed.Item, sourceName string) {
 	hub.Broadcast(msg)
 	log.Printf("💾 ذخیره شد: %s", item.Title)
 
-	// ============ ۳. غنی‌سازی در پس‌زمینه ============
+	// ۳. غنی‌سازی در پس‌زمینه
 	go enrichArticle(int(id), item.Link, item.Title, desc)
 }
 
@@ -422,9 +503,8 @@ func fetchFeed(source RSSSource, wg *sync.WaitGroup) {
 
 	log.Printf("📥 %s: %d خبر یافت شد", source.Name, len(feed.Items))
 
-	// پردازش همه اخبار به صورت موازی
 	var innerWg sync.WaitGroup
-	sem := make(chan struct{}, 20) // حداکثر ۲۰ پردازش همزمان
+	sem := make(chan struct{}, 5) // کاهش به 5 برای جلوگیری از rate limit
 
 	for _, item := range feed.Items {
 		var exists int
@@ -440,7 +520,7 @@ func fetchFeed(source RSSSource, wg *sync.WaitGroup) {
 			defer func() { <-sem }()
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("⚠️ panic در پردازش: %v", r)
+					log.Printf("⚠️ panic: %v", r)
 				}
 			}()
 			processArticle(it, source.Name)
@@ -468,7 +548,6 @@ func main() {
 	go hub.Run()
 	go fetchAllFeeds()
 
-	// به‌روزرسانی خودکار هر ۱۰ دقیقه
 	ticker := time.NewTicker(10 * time.Minute)
 	go func() {
 		for range ticker.C {
@@ -485,12 +564,11 @@ func main() {
 		AllowHeaders: "Origin, Content-Type, Accept",
 	}))
 
-	// ==================== WebSocket ====================
+	// WebSocket
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
 		hub.register <- c
 		defer func() { hub.unregister <- c }()
 
-		// ارسال اخبار اولیه به کلاینت جدید
 		rows, err := db.Query(`SELECT id, title, description, link, source, category, 
 			sentiment, published_at, translated_title 
 			FROM news ORDER BY published_at DESC LIMIT 50`)
@@ -520,7 +598,7 @@ func main() {
 		}
 	}))
 
-	// ==================== API: لیست اخبار ====================
+	// API: لیست اخبار
 	app.Get("/api/news", func(c fiber.Ctx) error {
 		category := c.Query("category", "")
 		limit := fiber.Query[int](c, "limit", 100)
@@ -559,7 +637,7 @@ func main() {
 		return c.JSON(news)
 	})
 
-	// ==================== API: جزئیات یک خبر ====================
+	// API: جزئیات خبر
 	app.Get("/api/news/:id", func(c fiber.Ctx) error {
 		id := c.Params("id")
 		var n NewsItem
@@ -576,7 +654,7 @@ func main() {
 		return c.JSON(n)
 	})
 
-	// ==================== API: دسته‌بندی‌ها ====================
+	// API: دسته‌بندی‌ها
 	app.Get("/api/categories", func(c fiber.Ctx) error {
 		rows, err := db.Query("SELECT DISTINCT category FROM news ORDER BY category")
 		if err != nil {
@@ -593,18 +671,17 @@ func main() {
 		return c.JSON(cats)
 	})
 
-	// ==================== API: به‌روزرسانی دستی ====================
+	// API: به‌روزرسانی دستی
 	app.Post("/api/refresh", func(c fiber.Ctx) error {
 		go fetchAllFeeds()
 		return c.JSON(fiber.Map{"message": "در حال به‌روزرسانی..."})
 	})
 
-	// ==================== API: آمار ====================
+	// API: آمار
 	app.Get("/api/stats", func(c fiber.Ctx) error {
-		var total int
-		var translated int
+		var total, translated int
 		db.QueryRow("SELECT COUNT(*) FROM news").Scan(&total)
-		db.QueryRow("SELECT COUNT(*) FROM news WHERE translated_content != '' AND translated_content IS NOT NULL").Scan(&translated)
+		db.QueryRow("SELECT COUNT(*) FROM news WHERE translated_content != '' AND translated_content != 'ترجمه در دسترس نیست'").Scan(&translated)
 		return c.JSON(fiber.Map{
 			"total":      total,
 			"translated": translated,
