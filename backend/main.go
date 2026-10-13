@@ -393,16 +393,16 @@ func enrichArticle(id int, link, title, desc string) {
 	}
 
 	// ۲. ترجمه عنوان
-	translatedTitle := safeTranslate(title)
-	if translatedTitle == "" {
-		translatedTitle = title
-	}
+	translatedTitle := title
+	// if translatedTitle == "" {
+	// 	translatedTitle = title
+	// }
 
 	// ۳. ترجمه متن کامل
-	translatedContent := safeTranslate(fullContent)
-	if translatedContent == "" {
-		translatedContent = "ترجمه در دسترس نیست"
-	}
+	translatedContent := fullContent
+	// if translatedContent == "" {
+	// 	translatedContent = "ترجمه در دسترس نیست"
+	// }
 
 	// ۴. UPDATE دیتابیس
 	_, err = db.Exec(
